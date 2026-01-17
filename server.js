@@ -141,7 +141,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const { roomName, targetScore, timeLimit, maxPlayers, speedIncrement, speedDecrement } = data;
+    const { roomName, targetScore, timeLimit, maxPlayers, speedIncrement, speedDecrement, questionTimeLimit } = data;
     const roomId = 'room_' + Date.now();
 
     const room = {
@@ -156,6 +156,7 @@ io.on('connection', (socket) => {
       maxPlayers: maxPlayers || 10,
       speedIncrement: speedIncrement || 0.3, // Tốc độ tăng khi đúng
       speedDecrement: speedDecrement || 0.2, // Tốc độ giảm khi sai
+      questionTimeLimit: questionTimeLimit || 30, // Thời gian trả lời câu hỏi (giây)
       startTime: null,
       timeline: gameLogic.initializeTimeline(),
       currentObstacle: 0,
@@ -173,6 +174,7 @@ io.on('connection', (socket) => {
       maxPlayers,
       speedIncrement,
       speedDecrement,
+      questionTimeLimit,
       createdBy: admin.username
     });
 
@@ -275,6 +277,7 @@ io.on('connection', (socket) => {
         timeLimit: room.timeLimit,
         speedIncrement: room.speedIncrement,
         speedDecrement: room.speedDecrement,
+        questionTimeLimit: room.questionTimeLimit,
         currentObstacle: {
           question: randomQuestion,
           name: 'Câu hỏi',
@@ -361,7 +364,7 @@ io.on('connection', (socket) => {
       id: socket.id,
       name: playerName,
       morale: 100,
-      speed: 1.0,
+      speed: 0.1, // Tốc độ ban đầu
       score: 0, // Điểm số thay vì position
       health: 100,
       joined: new Date()
@@ -386,7 +389,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('answer_question', (data) => {
-    const { roomId, questionId, answer } = data;
+    const { roomId, questionId, answer, isTimeout } = data;
     const playerInfo = players.get(socket.id);
     
     if (!playerInfo) return;
@@ -395,7 +398,8 @@ io.on('connection', (socket) => {
     if (!room || room.state !== 'racing') return;
 
     const question = questions.find(q => q.id === questionId);
-    const isCorrect = gameLogic.checkAnswer(questionId, answer);
+    // Nếu timeout, tính là trả lời sai
+    const isCorrect = isTimeout ? false : gameLogic.checkAnswer(questionId, answer);
 
     
     const moraleDelta = isCorrect ? 20 : -15;
@@ -415,7 +419,8 @@ io.on('connection', (socket) => {
       morale: playerInfo.playerData.morale,
       speed: playerInfo.playerData.speed,
       score: Math.round(playerInfo.playerData.score || 0),
-      question: question
+      question: question,
+      isTimeout
     });
 
     // Generate random next question
