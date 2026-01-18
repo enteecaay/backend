@@ -160,7 +160,8 @@ io.on('connection', (socket) => {
       startTime: null,
       timeline: gameLogic.initializeTimeline(),
       currentObstacle: 0,
-      winner: null
+      winner: null,
+      playerSeenQuestions: new Map() // Theo dõi câu hỏi đã hỏi cho mỗi người chơi
     };
 
     gameRooms.set(roomId, room);
@@ -271,7 +272,8 @@ io.on('connection', (socket) => {
     
     // Only emit to players, not admin
     room.players.forEach(player => {
-      const randomQuestion = gameLogic.generateRandomQuestion(questions);
+      const seenQuestions = room.playerSeenQuestions.get(player.id);
+      const randomQuestion = gameLogic.generateRandomQuestionWithoutRepeat(questions, seenQuestions);
       io.to(player.id).emit('race_started', {
         targetScore: room.targetScore,
         timeLimit: room.timeLimit,
@@ -290,10 +292,10 @@ io.on('connection', (socket) => {
     io.to(socket.id).emit('admin_race_started', { roomId });
 
     // Broadcast leaderboard and time remaining every second
-    const leaderboardInterval = setInterval(() => {
+    room.leaderboardInterval = setInterval(() => {
       const room = gameRooms.get(roomId);
       if (!room || room.state !== 'racing') {
-        clearInterval(leaderboardInterval);
+        clearInterval(room.leaderboardInterval);
         return;
       }
 
@@ -311,7 +313,8 @@ io.on('connection', (socket) => {
           id: p.id,
           name: p.name,
           score: Math.round(p.score),
-          speed: p.speed
+          speed: p.speed,
+          morale: p.morale
         }))
         .sort((a, b) => b.score - a.score);
 
@@ -328,7 +331,7 @@ io.on('connection', (socket) => {
         room.winner = winner || leaderboard[0];
         room.state = 'finished';
         room.finalStandings = leaderboard;
-        clearInterval(leaderboardInterval);
+        clearInterval(room.leaderboardInterval);
         
         io.to(roomId).emit('race_finished', {
           winner: room.winner,
@@ -371,6 +374,8 @@ io.on('connection', (socket) => {
     };
 
     room.players.push(player);
+    // Khởi tạo tập hợp câu hỏi đã hỏi cho người chơi mới
+    room.playerSeenQuestions.set(socket.id, new Set());
     players.set(socket.id, { roomId, playerData: player });
 
     socket.join(roomId);
@@ -423,8 +428,54 @@ io.on('connection', (socket) => {
       isTimeout
     });
 
-    // Generate random next question
-    const nextQuestion = gameLogic.generateRandomQuestion(questions);
+    // Kiểm tra nếu morale về 0 thì game over chỉ người chơi đó
+    if (playerInfo.playerData.morale === 0) {
+      // Loại bỏ người chơi khỏi cuộc đua
+      room.players = room.players.filter(p => p.id !== socket.id);
+      room.playerSeenQuestions.delete(socket.id);
+      
+      // Thông báo cho tất cả người chơi rằng ai đó đã bị loại
+      io.to(roomId).emit('player_eliminated', {
+        playerId: socket.id,
+        playerName: playerInfo.playerData.name,
+        reason: 'Morale về 0 - Đã hoàn toàn nản lòng',
+        remainingPlayers: room.players.length,
+        remainingPlayersList: room.players.map(p => ({ id: p.id, name: p.name }))
+      });
+      
+      // Gửi game over chỉ cho người chơi bị loại
+      io.to(socket.id).emit('game_over', {
+        reason: 'Đạo đức của bạn đã về 0 - Bạn đã hoàn toàn nản lòng!',
+        finalScore: Math.round(playerInfo.playerData.score || 0),
+        finalMorale: 0
+      });
+      
+      // Nếu không còn người chơi nào, kết thúc toàn bộ cuộc đua
+      if (room.players.length === 0) {
+        room.state = 'finished';
+        
+        // Tạo leaderboard rỗng hoặc từ dữ liệu đã lưu
+        const finalStandings = [];
+        
+        // Gửi thông báo kết thúc race cho tất cả (nếu còn ai đang theo dõi)
+        io.to(roomId).emit('race_finished', {
+          winner: null,
+          finalStandings: finalStandings,
+          reason: 'Tất cả người chơi đều đã bị loại - Cuộc đua kết thúc'
+        });
+        
+        // Dừng leaderboard interval nếu có
+        if (room.leaderboardInterval) {
+          clearInterval(room.leaderboardInterval);
+        }
+      }
+      
+      return;
+    }
+
+    // Generate random next question without repetition for this player
+    const seenQuestions = room.playerSeenQuestions.get(socket.id);
+    const nextQuestion = gameLogic.generateRandomQuestionWithoutRepeat(questions, seenQuestions);
     io.to(roomId).emit('next_obstacle', { obstacle: nextQuestion });
   });
 
@@ -485,6 +536,8 @@ io.on('connection', (socket) => {
       const room = gameRooms.get(playerInfo.roomId);
       if (room) {
         room.players = room.players.filter(p => p.id !== socket.id);
+        // Xóa dữ liệu câu hỏi đã hỏi của người chơi
+        room.playerSeenQuestions.delete(socket.id);
         io.to(playerInfo.roomId).emit('player_left', {
           playerId: socket.id,
           players: room.players.map(p => ({

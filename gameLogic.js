@@ -77,6 +77,29 @@ function generateRandomQuestion(questionsList) {
   return questionsList[randomIndex];
 }
 
+// Hàm tạo câu hỏi ngẫu nhiên mà không lặp lại
+// seenQuestionIds: tập hợp các ID câu hỏi đã được hỏi
+function generateRandomQuestionWithoutRepeat(questionsList, seenQuestionIds = new Set()) {
+  // Lọc các câu hỏi chưa được hỏi
+  const availableQuestions = questionsList.filter(q => !seenQuestionIds.has(q.id));
+  
+  // Nếu tất cả câu hỏi đã được hỏi, reset và bắt đầu lại
+  if (availableQuestions.length === 0) {
+    seenQuestionIds.clear();
+    // Trả về một câu hỏi ngẫu nhiên từ danh sách ban đầu
+    const randomIndex = Math.floor(Math.random() * questionsList.length);
+    seenQuestionIds.add(questionsList[randomIndex].id);
+    return questionsList[randomIndex];
+  }
+  
+  // Chọn ngẫu nhiên từ các câu hỏi còn lại
+  const randomIndex = Math.floor(Math.random() * availableQuestions.length);
+  const selectedQuestion = availableQuestions[randomIndex];
+  seenQuestionIds.add(selectedQuestion.id);
+  
+  return selectedQuestion;
+}
+
 module.exports = {
   initializeTimeline,
   generateObstacle,
@@ -86,6 +109,7 @@ module.exports = {
   updatePlayerSpeed,
   calculateDistance,
   generateRandomQuestion,
+  generateRandomQuestionWithoutRepeat,
   TIMELINE,
   OBSTACLES,
   POWER_UPS
