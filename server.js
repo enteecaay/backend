@@ -776,21 +776,31 @@ function applyItemEffect(room, playerId, item, targetPlayerId, io, roomId) {
     case 'fog': {
       room.players.forEach(p => {
         if (p.id !== playerId && !p.shieldActive) {
-          room.playersWithLockedShop.add(p.id);
-          
-          setTimeout(() => {
-            room.playersWithLockedShop.delete(p.id);
-            io.to(p.id).emit('shop_unlocked');
-            io.to(p.id).emit('global_notification', {
-              message: `Shop đã được mở khóa`,
-              type: 'info'
-            });
-          }, 30000);
-          
+          // Thông báo sương mù sắp đến
           io.to(p.id).emit('global_notification', {
-            message: `${player.name} tung sương mù 🌫️! Shop của bạn bị khóa 30 giây`,
+            message: `${player.name} tung sương mù 🌫️! Shop sẽ bị khóa sau 10 giây`,
             type: 'danger'
           });
+          
+          // Delay 10s trước khi khóa shop
+          setTimeout(() => {
+            room.playersWithLockedShop.add(p.id);
+            
+            io.to(p.id).emit('global_notification', {
+              message: `Shop của bạn đã bị khóa trong 30 giây!`,
+              type: 'danger'
+            });
+            
+            // Mở khóa sau 30s
+            setTimeout(() => {
+              room.playersWithLockedShop.delete(p.id);
+              io.to(p.id).emit('shop_unlocked');
+              io.to(p.id).emit('global_notification', {
+                message: `Shop đã được mở khóa`,
+                type: 'info'
+              });
+            }, 30000);
+          }, 10000);
         } else if (p.id !== playerId && p.shieldActive) {
           p.shieldActive = false;
           io.to(p.id).emit('global_notification', {
