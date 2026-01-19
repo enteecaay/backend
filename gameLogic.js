@@ -86,7 +86,7 @@ function calculateScore(morale, speed, distance) {
 function updatePlayerSpeed(currentSpeed, isCorrect, speedIncrement = 0.3, speedDecrement = 0.2) {
   const speedChange = isCorrect ? speedIncrement : -speedDecrement;
   const newSpeed = currentSpeed + speedChange;
-  return Math.max(0.1, Math.min(5.0, newSpeed)); // Min 0.1, Max 5.0
+  return Math.max(0.1, newSpeed); // Min 0.1, không giới hạn tối đa
 }
 
 function calculateDistance(speed, timeDelta) {
