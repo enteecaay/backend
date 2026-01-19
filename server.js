@@ -528,9 +528,23 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Với tên lửa, cần có target
+    // Với tên lửa, cần có target. Nếu chưa chọn, trả về danh sách mục tiêu trong tầm ±50 điểm
     if (item.id === 'rocket' && !targetPlayerId) {
-      socket.emit('error', { message: 'Vui lòng chọn mục tiêu cho tên lửa' });
+      const myScore = player.score;
+      const targets = room.players
+        .filter(p => p.id !== socket.id && Math.abs(p.score - myScore) <= 50)
+        .map(p => ({ id: p.id, name: p.name, score: Math.round(p.score) }));
+
+      if (targets.length === 0) {
+        socket.emit('error', { message: 'Không có đối thủ trong tầm nhìn để bắn tên lửa' });
+        return;
+      }
+
+      socket.emit('need_target', {
+        itemId: item.id,
+        itemName: item.name,
+        targets
+      });
       return;
     }
 
