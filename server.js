@@ -150,18 +150,19 @@ io.on('connection', (socket) => {
       createdBy: admin.adminId,
       createdAt: new Date(),
       players: [],
-      state: 'waiting', // waiting, racing, finished
-      targetScore: targetScore || 100, // Điểm cần đạt để thắng
-      timeLimit: timeLimit || 600, // seconds
+      state: 'waiting',
+      targetScore: targetScore || 100,
+      timeLimit: timeLimit || 600,
       maxPlayers: maxPlayers || 10,
-      speedIncrement: speedIncrement || 0.3, // Tốc độ tăng khi đúng
-      speedDecrement: speedDecrement || 0.2, // Tốc độ giảm khi sai
-      questionTimeLimit: questionTimeLimit || 30, // Thời gian trả lời câu hỏi (giây)
+      speedIncrement: speedIncrement || 0.3,
+      speedDecrement: speedDecrement || 0.2,
+      questionTimeLimit: questionTimeLimit || 30,
       startTime: null,
       timeline: gameLogic.initializeTimeline(),
       currentObstacle: 0,
       winner: null,
-      playerSeenQuestions: new Map() // Theo dõi câu hỏi đã hỏi cho mỗi người chơi
+      playerSeenQuestions: new Map(),
+      playersWithLockedShop: new Set()
     };
 
     gameRooms.set(roomId, room);
@@ -314,7 +315,8 @@ io.on('connection', (socket) => {
           name: p.name,
           score: Math.round(p.score),
           speed: p.speed,
-          morale: p.morale
+          morale: p.morale,
+          shieldActive: p.shieldActive
         }))
         .sort((a, b) => b.score - a.score);
 
@@ -325,10 +327,9 @@ io.on('connection', (socket) => {
         totalTime: room.timeLimit
       });
 
-      // Check if someone reached target score or time is up
-      const winner = room.players.find(p => p.score >= room.targetScore);
-      if ((winner || timeRemaining <= 0) && !room.winner) {
-        room.winner = winner || leaderboard[0];
+      // Race kết thúc khi hết giờ - người có điểm cao nhất thắng
+      if (timeRemaining <= 0 && !room.winner) {
+        room.winner = leaderboard[0]; // Người có điểm cao nhất
         room.state = 'finished';
         room.finalStandings = leaderboard;
         clearInterval(room.leaderboardInterval);
@@ -339,6 +340,22 @@ io.on('connection', (socket) => {
         });
       }
     }, 1000);
+
+    // Open shop every 30 seconds (10s open + 20s closed)
+    room.shopInterval = setInterval(() => {
+      const room = gameRooms.get(roomId);
+      if (!room || room.state !== 'racing') {
+        clearInterval(room.shopInterval);
+        return;
+      }
+
+      io.to(roomId).emit('shop_opened', {
+        shopItems: gameLogic.getShopItems(),
+        timeLimit: 10
+      });
+
+      console.log(`Shop opened in room ${roomId}`);
+    }, 30000);
 
     console.log(`Race started in room ${roomId}`);
   });
@@ -367,10 +384,13 @@ io.on('connection', (socket) => {
       id: socket.id,
       name: playerName,
       morale: 100,
-      speed: 0.1, // Tốc độ ban đầu
-      score: 0, // Điểm số thay vì position
+      speed: 0.1,
+      score: 0,
       health: 100,
-      joined: new Date()
+      joined: new Date(),
+      inventory: [],
+      shopLocked: false,
+      shieldActive: false
     };
 
     room.players.push(player);
@@ -476,7 +496,94 @@ io.on('connection', (socket) => {
     // Generate random next question without repetition for this player
     const seenQuestions = room.playerSeenQuestions.get(socket.id);
     const nextQuestion = gameLogic.generateRandomQuestionWithoutRepeat(questions, seenQuestions);
-    io.to(roomId).emit('next_obstacle', { obstacle: nextQuestion });
+    // Chỉ gửi câu hỏi mới cho người chơi đã trả lời, không gửi cho toàn bộ phòng
+    io.to(socket.id).emit('next_obstacle', { obstacle: nextQuestion });
+  });
+
+  socket.on('buy_item', (data) => {
+    const { roomId, itemId, targetPlayerId } = data;
+    const playerInfo = players.get(socket.id);
+    
+    if (!playerInfo) return;
+
+    const room = gameRooms.get(roomId);
+    if (!room || room.state !== 'racing') return;
+
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player) return;
+
+    if (room.playersWithLockedShop.has(socket.id)) {
+      socket.emit('error', { message: 'Shop của bạn đã bị khóa' });
+      return;
+    }
+
+    const item = gameLogic.SHOP_ITEMS[itemId];
+    if (!item) {
+      socket.emit('error', { message: 'Item không tồn tại' });
+      return;
+    }
+
+    if (player.score < item.cost) {
+      socket.emit('error', { message: 'Điểm không đủ' });
+      return;
+    }
+
+    // Với tên lửa, cần có target
+    if (item.id === 'rocket' && !targetPlayerId) {
+      socket.emit('error', { message: 'Vui lòng chọn mục tiêu cho tên lửa' });
+      return;
+    }
+
+    player.score -= item.cost;
+
+    // Đóng shop cho người mua ngay lập tức
+    socket.emit('close_shop');
+
+    if (item.type === 'mystery') {
+      const treasureContent = gameLogic.generateTreasureContent();
+      socket.emit('treasure_opened', { treasure: treasureContent });
+      
+      setTimeout(() => {
+        applyTreasureEffect(room, socket.id, treasureContent, io, roomId);
+      }, 2000);
+    } else {
+      // Sử dụng item ngay lập tức
+      applyItemEffect(room, socket.id, item, targetPlayerId, io, roomId);
+    }
+
+    io.to(roomId).emit('player_bought_item', {
+      playerId: socket.id,
+      playerName: player.name,
+      itemName: item.name,
+      itemIcon: item.icon,
+      newScore: player.score
+    });
+  });
+
+  socket.on('use_item', (data) => {
+    const { roomId, inventoryIndex, targetPlayerId } = data;
+    const playerInfo = players.get(socket.id);
+    
+    if (!playerInfo) return;
+
+    const room = gameRooms.get(roomId);
+    if (!room || room.state !== 'racing') return;
+
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player || !player.inventory[inventoryIndex]) return;
+
+    const item = player.inventory[inventoryIndex];
+    
+    player.inventory.splice(inventoryIndex, 1);
+
+    applyItemEffect(room, socket.id, item, targetPlayerId, io, roomId);
+
+    io.to(roomId).emit('item_used', {
+      playerId: socket.id,
+      playerName: player.name,
+      itemName: item.name,
+      targetPlayerId
+    });
   });
 
   socket.on('player_move', (data) => {
@@ -536,7 +643,6 @@ io.on('connection', (socket) => {
       const room = gameRooms.get(playerInfo.roomId);
       if (room) {
         room.players = room.players.filter(p => p.id !== socket.id);
-        // Xóa dữ liệu câu hỏi đã hỏi của người chơi
         room.playerSeenQuestions.delete(socket.id);
         io.to(playerInfo.roomId).emit('player_left', {
           playerId: socket.id,
@@ -549,11 +655,13 @@ io.on('connection', (socket) => {
           }))
         });
 
-        // Delete room if empty and not racing
         if (room.players.length === 0 && room.state === 'waiting') {
           gameRooms.delete(playerInfo.roomId);
           io.emit('room_deleted', { roomId: playerInfo.roomId });
         }
+
+        // Cleanup intervals
+        if (room.shopInterval) clearInterval(room.shopInterval);
       }
       players.delete(socket.id);
     }
@@ -561,6 +669,190 @@ io.on('connection', (socket) => {
     console.log(`User disconnected: ${socket.id}`);
   });
 });
+
+function applyItemEffect(room, playerId, item, targetPlayerId, io, roomId) {
+  const player = room.players.find(p => p.id === playerId);
+  
+  switch(item.id) {
+    case 'rocket': {
+      const target = room.players.find(p => p.id === targetPlayerId);
+      if (target) {
+        if (!target.shieldActive) {
+          target.speed = Math.max(0.1, target.speed * 0.5);
+          io.to(targetPlayerId).emit('global_notification', {
+            message: `${player.name} bắn tên lửa 🚀 vào bạn! Tốc độ giảm 50%`,
+            type: 'danger'
+          });
+        } else {
+          target.shieldActive = false;
+          io.to(targetPlayerId).emit('global_notification', {
+            message: `Lá chắn 🛡️ của bạn đã chặn tên lửa từ ${player.name}!`,
+            type: 'success'
+          });
+        }
+        
+        io.to(playerId).emit('global_notification', {
+          message: `Bạn đã phóng tên lửa 🚀 vào ${target.name}`,
+          type: 'success'
+        });
+      }
+      break;
+    }
+    
+    case 'freeze': {
+      room.players.forEach(p => {
+        if (p.id !== playerId && !p.shieldActive) {
+          p.speed = Math.max(0.1, p.speed * 0.5);
+          io.to(p.id).emit('global_notification', {
+            message: `${player.name} đóng băng ❄️ bạn! Tốc độ giảm 50%`,
+            type: 'danger'
+          });
+        } else if (p.id !== playerId && p.shieldActive) {
+          p.shieldActive = false;
+          io.to(p.id).emit('global_notification', {
+            message: `Lá chắn 🛡️ của bạn đã chặn băng giá`,
+            type: 'success'
+          });
+        }
+      });
+      
+      io.to(playerId).emit('global_notification', {
+        message: `Bạn đã đóng băng ❄️ tất cả đối thủ`,
+        type: 'success'
+      });
+      break;
+    }
+    
+    case 'shield': {
+      player.shieldActive = true;
+      setTimeout(() => {
+        player.shieldActive = false;
+      }, 10000);
+      io.to(playerId).emit('global_notification', {
+        message: `Bạn đang được bảo vệ bởi lá chắn 🛡️ trong 10 giây`,
+        type: 'success'
+      });
+      break;
+    }
+    
+    case 'storm': {
+      room.players.forEach(p => {
+        if (p.id !== playerId && !p.shieldActive) {
+          p.score = Math.max(0, p.score - 10);
+          io.to(p.id).emit('global_notification', {
+            message: `${player.name} triệu hồi bão táp ⛈️! Bạn mất 10 điểm`,
+            type: 'danger'
+          });
+        } else if (p.id !== playerId && p.shieldActive) {
+          p.shieldActive = false;
+          io.to(p.id).emit('global_notification', {
+            message: `Lá chắn 🛡️ của bạn đã chặn bão táp`,
+            type: 'success'
+          });
+        }
+      });
+      
+      io.to(playerId).emit('global_notification', {
+        message: `Bạn đã triệu hồi bão táp ⛈️ cho tất cả đối thủ`,
+        type: 'success'
+      });
+      break;
+    }
+    
+    case 'fog': {
+      room.players.forEach(p => {
+        if (p.id !== playerId && !p.shieldActive) {
+          room.playersWithLockedShop.add(p.id);
+          
+          setTimeout(() => {
+            room.playersWithLockedShop.delete(p.id);
+            io.to(p.id).emit('shop_unlocked');
+            io.to(p.id).emit('global_notification', {
+              message: `Shop đã được mở khóa`,
+              type: 'info'
+            });
+          }, 30000);
+          
+          io.to(p.id).emit('global_notification', {
+            message: `${player.name} tung sương mù 🌫️! Shop của bạn bị khóa 30 giây`,
+            type: 'danger'
+          });
+        } else if (p.id !== playerId && p.shieldActive) {
+          p.shieldActive = false;
+          io.to(p.id).emit('global_notification', {
+            message: `Lá chắn 🛡️ của bạn đã chặn sương mù`,
+            type: 'success'
+          });
+        }
+      });
+      
+      io.to(playerId).emit('global_notification', {
+        message: `Bạn đã tung sương mù 🌫️ khóa shop tất cả đối thủ`,
+        type: 'success'
+      });
+      break;
+    }
+  }
+}
+
+function applyTreasureEffect(room, playerId, treasureContent, io, roomId) {
+  const player = room.players.find(p => p.id === playerId);
+  
+  if (treasureContent.type === 'positive') {
+    const itemId = treasureContent.content.item;
+    const item = gameLogic.SHOP_ITEMS[itemId];
+    
+    // Đối với tên lửa, chọn mục tiêu là đối thủ mạnh nhất trong tầm nhìn
+    let targetPlayerId = null;
+    if (itemId === 'rocket') {
+      const myScore = player.score;
+      const visiblePlayers = room.players.filter(p => 
+        p.id !== playerId && Math.abs(p.score - myScore) <= 50
+      );
+      
+      if (visiblePlayers.length > 0) {
+        // Chọn đối thủ có điểm cao nhất trong tầm nhìn
+        const topPlayer = visiblePlayers.reduce((max, p) => 
+          p.score > max.score ? p : max
+        );
+        targetPlayerId = topPlayer.id;
+      }
+    }
+    
+    // Dùng item ngay lập tức
+    applyItemEffect(room, playerId, item, targetPlayerId, io, roomId);
+    
+    io.to(playerId).emit('global_notification', {
+      message: `🎁 Rương báu: Bạn nhận được ${item.icon} ${item.name} và dùng ngay!`,
+      type: 'success'
+    });
+  } else {
+    const content = treasureContent.content;
+    
+    if (content.effect.resetSpeed) {
+      room.players.forEach(p => {
+        p.speed = 0.1; // Reset về initial speed
+      });
+      
+      io.to(roomId).emit('global_notification', {
+        message: `⚡ Cơn sốc tức thời! Tất cả tốc độ reset về 0.1`,
+        type: 'danger'
+      });
+    }
+    
+    if (content.effect.scorePenalty) {
+      player.score = Math.max(0, player.score - content.effect.scorePenalty);
+    }
+    
+    if (content.effect.lockShop) {
+      room.playersWithLockedShop.add(playerId);
+      setTimeout(() => {
+        room.playersWithLockedShop.delete(playerId);
+        io.to(playerId).emit('shop_unlocked');
+      }, content.duration);
+    }
+  }
+}
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
