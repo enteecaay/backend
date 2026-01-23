@@ -13,7 +13,21 @@ const io = socketIO(server, {
     credentials: true
   },
   transports: ['websocket', 'polling'],
-  allowEIO3: true
+  allowEIO3: true,
+  // Ngăn render tự động dừng - Keepalive settings
+  pingInterval: 25000,           // Ping client mỗi 25s
+  pingTimeout: 60000,            // Chờ pong response 60s trước khi disconnect
+  upgradeTimeout: 10000,         // Timeout cho upgrade transport
+  maxHttpBufferSize: 1e6,        // Tăng buffer size
+  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 5000,
+  reconnectionAttempts: Infinity,
+  // Prevent graceful shutdown
+  allowRequest: (req, callback) => {
+    callback(null, true); // Allow all requests
+  }
 });
 
 app.use(cors({
@@ -682,7 +696,30 @@ io.on('connection', (socket) => {
     
     console.log(`User disconnected: ${socket.id}`);
   });
+
+  // Heartbeat - Keep connection alive
+  socket.on('heartbeat', () => {
+    socket.emit('heartbeat_ack', { timestamp: Date.now() });
+  });
+
+  // Reconnection handler
+  socket.on('reconnect_attempt', () => {
+    console.log(`Reconnection attempt: ${socket.id}`);
+  });
+
+  socket.on('connect_error', (error) => {
+    console.error(`Connection error: ${socket.id}`, error);
+  });
 });
+
+// Server keepalive - Prevent server from being idle
+setInterval(() => {
+  io.emit('server_heartbeat', { 
+    timestamp: Date.now(),
+    activeRooms: gameRooms.size,
+    activePlayers: players.size
+  });
+}, 30000);
 
 function applyItemEffect(room, playerId, item, targetPlayerId, io, roomId) {
   const player = room.players.find(p => p.id === playerId);
@@ -882,4 +919,23 @@ const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// HTTP server keepalive settings
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+// Handle server errors
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, but keeping server alive for active connections');
+  // Graceful shutdown logic if needed
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, but keeping server alive for active connections');
+  // Graceful shutdown logic if needed
 });
